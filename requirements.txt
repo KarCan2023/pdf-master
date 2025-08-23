@@ -1,5 +1,6 @@
 streamlit>=1.32
-pymupdf>=1.23
+pymupdf>=1.24.10
 pillow>=9.5
 pytesseract>=0.3.10
 opencv-python-headless>=4.9
+requests>=2.31
