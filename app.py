@@ -13,6 +13,7 @@ Opcional: opencv-python-headless para preprocesado de OCR.
 import io
 import re
 import zipfile
+import tempfile, os
 from typing import List, Tuple, Optional
 
 import streamlit as st
@@ -103,13 +104,21 @@ def pdf_bytes_to_doc(pdf_bytes: bytes) -> fitz.Document:
     return fitz.open(stream=pdf_bytes, filetype="pdf")
 
 
-def doc_to_bytes(doc: fitz.Document, **save_kwargs) -> bytes:
-    out = io.BytesIO()
-    # Config por defecto para tamaño / compatibilidad
-    default_args = dict(garbage=4, deflate=True, clean=True, linear=True)
-    default_args.update(save_kwargs or {})
-    doc.save(out, **default_args)
-    return out.getvalue()
+def doc_to_bytes(doc):
+    # opciones seguras y efectivas para compresión
+    opts = dict(garbage=4, deflate=True, deflate_images=True, deflate_fonts=True, clean=True)
+    return doc.write(**opts)  # escribe a bytes en memoria
+
+def doc_to_bytes_linear(doc):
+    opts = dict(garbage=4, deflate=True, deflate_images=True, deflate_fonts=True, clean=True)
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        path = tmp.name
+    doc.save(path, **opts, linear=True)  # linearización OK en archivo
+    with open(path, "rb") as f:
+        data = f.read()
+    os.remove(path)
+    return data
+
 
 
 # =========================
