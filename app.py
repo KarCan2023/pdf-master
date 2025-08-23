@@ -15,6 +15,10 @@ import re
 import zipfile
 import tempfile, os
 from typing import List, Tuple, Optional
+import time
+import json
+import requests
+
 
 import streamlit as st
 import fitz  # PyMuPDF
@@ -119,6 +123,83 @@ def doc_to_bytes_linear(doc):
     os.remove(path)
     return data
 
+def doc_to_bytes_with_options(doc, **opts):
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        path = tmp.name
+    doc.save(path, **opts)
+    with open(path, "rb") as f:
+        data = f.read()
+    os.remove(path)
+    return data
+
+
+def _summarize_extract_text_from_pdf(pdf_bytes: bytes, page_from: int | None = None, page_to: int | None = None) -> str:
+    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+        n = doc.page_count
+        if page_from is None:
+            page_from = 1
+        if page_to is None or page_to <= 0:
+            page_to = n
+        page_from = max(1, min(page_from, n))
+        page_to = max(1, min(page_to, n))
+        if page_from > page_to:
+            page_from, page_to = page_to, page_from
+        out = []
+        for i in range(page_from - 1, page_to):
+            out.append(doc.load_page(i).get_text("text"))
+        return "\n".join(out).strip()
+
+def _split_into_chunks(text: str, chunk_size: int = 4000, overlap: int = 200):
+    if not text:
+        return []
+    chunk_size = max(500, chunk_size)
+    overlap = max(0, min(overlap, chunk_size // 2))
+    chunks, start = [], 0
+    while start < len(text):
+        end = min(len(text), start + chunk_size)
+        chunks.append(text[start:end])
+        if end == len(text):
+            break
+        start = end - overlap
+    return chunks
+
+def _call_openai_chat(api_key: str, base_url: str, model: str, messages, temperature: float = 0.2, timeout: int = 90) -> str:
+    url = base_url.rstrip("/") + "/chat/completions"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = {"model": model, "messages": messages, "temperature": max(0.0, min(1.0, float(temperature)))}
+    resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+    resp.raise_for_status()
+    data = resp.json()
+    try:
+        return data["choices"][0]["message"]["content"].strip()
+    except Exception:
+        return json.dumps(data, ensure_ascii=False, indent=2)
+
+def _map_reduce_summarize(api_key: str, base_url: str, model: str, chunks, language: str = "es", temperature: float = 0.2):
+    if not chunks:
+        return "", []
+    partials = []
+    for ch in chunks:
+        messages = [
+            {"role": "system", "content": f"Eres un analista experto que resume documentos en {language}. Sé fiel al texto, sin inventar."},
+            {"role": "user", "content": "Resume el siguiente fragmento en viñetas claras (5-10 bullets), con cifras, definiciones y nombres propios relevantes. No añadas opiniones ni información que no esté en el texto.\n\n" + ch},
+        ]
+        partials.append(_call_openai_chat(api_key, base_url, model, messages, temperature=temperature))
+    corpus = "\n\n".join(partials)
+    reduce_messages = [
+        {"role": "system", "content": f"Eres un analista que consolida resúmenes parciales en un resumen único, en {language}, conciso y accionable."},
+        {"role": "user", "content": (
+            "A partir de los resúmenes parciales siguientes, crea un único resumen final con estas secciones:\n"
+            "1) Resumen ejecutivo (150-250 palabras).\n"
+            "2) Puntos clave (bullets concretos).\n"
+            "3) Riesgos/limitaciones del documento.\n"
+            "4) Acciones recomendadas (bullets accionables).\n"
+            "5) Citas textuales relevantes (si las hay).\n\n"
+            "Resúmenes parciales:\n" + corpus
+        )},
+    ]
+    final_summary = _call_openai_chat(api_key, base_url, model, reduce_messages, temperature=temperature)
+    return final_summary, partials
 
 
 # =========================
@@ -304,16 +385,12 @@ def make_zip(filetuples: List[Tuple[str, bytes]]) -> bytes:
 # =========================
 
 def unlock_pdf(pdf_bytes: bytes, password: str) -> bytes:
-    """
-    Quita la contraseña si el usuario la proporciona. No evade protecciones sin clave.
-    """
     doc = pdf_bytes_to_doc(pdf_bytes)
     if doc.needs_pass:
-        ok = doc.authenticate(password)
-        if not ok:
+        if not doc.authenticate(password):
             raise ValueError("Contraseña incorrecta.")
-    # Guardar sin cifrado
-    return doc_to_bytes(doc, encryption=fitz.PDF_ENCRYPT_NONE)
+    return doc_to_bytes_with_options(doc, encryption=fitz.PDF_ENCRYPT_NONE)
+
 
 
 def reorder_pdf(pdf_bytes: bytes, order_str: str) -> bytes:
@@ -430,7 +507,7 @@ with st.sidebar:
     st.markdown("---")
     st.info("Consejo: para resultados más livianos, baja DPI y/o Calidad JPEG. Para OCR, DPI 200–300 suele mejorar resultados.")
 
-tabs = st.tabs(["Comprimir", "Dividir", "Combinar", "Extraer", "Convertir", "Desbloquear", "Ordenar/Rotar", "OCR"])
+tabs = st.tabs(["Comprimir", "Dividir", "Combinar", "Extraer", "Convertir", "Desbloquear", "Ordenar/Rotar", "OCR", "Resumir con IA"])
 
 # --------- Comprimir ---------
 with tabs[0]:
@@ -608,6 +685,78 @@ with tabs[7]:
                 st.download_button("⬇️ Descargar PDF buscable", data=out, file_name=f"ocr_{ocr_file.name}", mime="application/pdf")
         except Exception as e:
             st.error(f"Error: {e}")
+
+with tabs[8]:
+    st.subheader("🤖 Resumir con IA")
+    sum_file = st.file_uploader("Sube un PDF", type=["pdf"], key="summarize")
+    colp = st.columns(2)
+    with colp[0]:
+        page_from = st.number_input("Desde página (1-indexed)", min_value=1, value=1, step=1)
+    with colp[1]:
+        page_to = st.number_input("Hasta página (0 = hasta el final)", min_value=0, value=0, step=1)
+
+    colc = st.columns(2)
+    with colc[0]:
+        chunk_size = st.slider("Tamaño de fragmento", 1000, 8000, 4000, 500)
+        overlap = st.slider("Solape", 0, 1000, 200, 50)
+    with colc[1]:
+        language = st.selectbox("Idioma", ["es", "en"], index=0)
+        temperature = st.slider("Temperature", 0.0, 1.0, 0.2, 0.1)
+
+    st.markdown("**Proveedor LLM**")
+    provider = st.selectbox("Tipo", ["OpenAI (api.openai.com)", "OpenAI-compatible (custom base_url)"])
+    default_base = "https://api.openai.com/v1" if provider.startswith("OpenAI (") else ""
+
+    if "llm_api_key" not in st.session_state:
+        st.session_state.llm_api_key = ""
+    api_key = st.text_input("API Key", type="password", value=st.session_state.llm_api_key)
+    if api_key and api_key != st.session_state.llm_api_key:
+        st.session_state.llm_api_key = api_key
+    base_url = st.text_input("Base URL", value=default_base)
+    model = st.text_input("Modelo", value="gpt-4o-mini")
+
+    if sum_file and st.button("Generar resumen", type="primary", use_container_width=True):
+        if not api_key:
+            st.error("Ingresa tu API Key.")
+        elif not base_url or not model:
+            st.error("Base URL y modelo son obligatorios.")
+        else:
+            with st.spinner("Extrayendo texto..."):
+                n_from = int(page_from)
+                n_to = int(page_to) if int(page_to) > 0 else None
+                text = _summarize_extract_text_from_pdf(sum_file.read(), n_from, n_to)
+            if not text:
+                st.warning("No se encontró texto. Si el PDF es escaneado, usa la pestaña OCR primero.")
+            else:
+                chunks = _split_into_chunks(text, chunk_size=chunk_size, overlap=overlap)
+                st.info(f"Fragmentos a resumir: {len(chunks)}")
+                try:
+                    with st.spinner("Resumiendo..."):
+                        final_summary, partials = _map_reduce_summarize(
+                            api_key=api_key,
+                            base_url=base_url,
+                            model=model,
+                            chunks=chunks,
+                            language=language,
+                            temperature=temperature,
+                        )
+                    st.subheader("Resumen final")
+                    st.markdown(final_summary)
+                    st.download_button("⬇️ Descargar resumen (.md)", data=final_summary.encode("utf-8"),
+                                       file_name="resumen.md", mime="text/markdown")
+                    with st.expander("Resúmenes parciales"):
+                        for i, p in enumerate(partials, 1):
+                            st.markdown(f"**Parte {i}**")
+                            st.markdown(p)
+                            st.divider()
+                except requests.HTTPError as e:
+                    details = getattr(e.response, "text", str(e))
+                    st.error("Error del proveedor LLM. Revisa modelo/base_url o saldo.")
+                    st.code(details[:1000])
+                except Exception as e:
+                    st.error("Fallo al generar el resumen.")
+                    st.code(str(e))
+
 
 st.markdown("---")
 with st.expander("ℹ️ Notas y límites prácticos"):
