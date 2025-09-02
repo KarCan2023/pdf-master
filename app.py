@@ -877,64 +877,66 @@ with tabs[9]:
             key="anno_canvas",
         )
 
-        # Aplicar anotaciones al PDF
-        if (sig_file or text_to_add) and st.button("Aplicar anotaciones", type="primary"):
-            if canvas_result.json_data:
-                data = json.loads(canvas_result.json_data)
+# Aplicar anotaciones al PDF
+if (sig_file or text_to_add) and st.button("Aplicar anotaciones", type="primary"):
+    raw = canvas_result.json_data
+    if not raw:
+        st.error("No se recibieron datos del canvas.")
+        st.stop()
 
-                # Tomar 1ra imagen seleccionable (firma) y 1er objeto de texto
-                sig_obj = next(
-                    (o for o in data.get("objects", [])
-                        if o.get("type") == "image" and o.get("selectable", True)),
-                    None
-                )
-                txt_obj = next(
-                    (o for o in data.get("objects", [])
-                        if o.get("type") in ("i-text", "textbox")),
-                    None
-                )
+    # 0. json_data puede ser dict (v0.9.3) o str (otras versiones)
+    if isinstance(raw, (dict, list)):
+        data = raw
+    else:
+        data = json.loads(raw)
 
-                inv_zoom = 1.0 / zoom
-                px_to_pt = 72.0 / float(dpi)  # px originales -> puntos PDF
+    # 1. Los objetos pueden venir dentro de "objects" o ser la lista directamente
+    objs = data.get("objects", data)
 
-                def to_pt(x):  # coord canvas -> px original -> puntos
-                    return float(x) * inv_zoom * px_to_pt
+    # 2. Tomar firma (imagen seleccionable) y texto (i-text/textbox)
+    sig_obj = next((o for o in objs if o.get("type") == "image" and o.get("selectable", True)), None)
+    txt_obj = next((o for o in objs if o.get("type") in ("i-text", "textbox")), None)
 
-                # Firma
-                sig_x = to_pt(sig_obj["left"]) if sig_obj else 0.0
-                sig_y = to_pt(sig_obj["top"]) if sig_obj else 0.0
-                sig_w = 0.0
-                if sig_obj:
-                    eff_w_canvas = float(sig_obj["width"]) * float(sig_obj.get("scaleX", 1.0))
-                    sig_w = to_pt(eff_w_canvas)
+    inv_zoom = 1.0 / zoom
+    px_to_pt = 72.0 / float(dpi)       # px originales -> puntos PDF
+    def to_pt(x): return float(x) * inv_zoom * px_to_pt
 
-                # Texto
-                text_x = to_pt(txt_obj["left"]) if txt_obj else 0.0
-                text_y = to_pt(txt_obj["top"]) if txt_obj else 0.0
-                fs_canvas = float(txt_obj.get("fontSize", font_size * zoom)) if txt_obj else float(font_size * zoom)
-                font_size_pt = to_pt(fs_canvas)
+    # 3. Coordenadas y tamaños efectivos (Fabric usa width*scaleX, height*scaleY)
+    sig_x = to_pt(sig_obj["left"]) if sig_obj else 0.0
+    sig_y = to_pt(sig_obj["top"]) if sig_obj else 0.0
+    if sig_obj:
+        eff_w_canvas = float(sig_obj["width"]) * float(sig_obj.get("scaleX", 1.0))
+        sig_w = to_pt(eff_w_canvas)
+    else:
+        sig_w = 0.0
 
-                out = annotate_pdf(
-                    pdf_bytes,
-                    sig_bytes=sig_bytes if sig_obj else None,
-                    sig_page=int(page_num),
-                    sig_x=sig_x,
-                    sig_y=sig_y,
-                    sig_width=sig_w,
-                    text=txt_obj.get("text","") if txt_obj else "",
-                    text_page=int(page_num),
-                    text_x=text_x,
-                    text_y=text_y,
-                    font_size=int(font_size_pt),
-                )
+    text_x = to_pt(txt_obj["left"]) if txt_obj else 0.0
+    text_y = to_pt(txt_obj["top"]) if txt_obj else 0.0
+    fs_canvas = float(txt_obj.get("fontSize", font_size * zoom)) if txt_obj else float(font_size * zoom)
+    font_size_pt = to_pt(fs_canvas)
 
-                st.success("Listo ✅")
-                st.download_button(
-                    "⬇️ Descargar PDF anotado",
-                    data=out,
-                    file_name=f"annotated_{ann_file.name}",
-                    mime="application/pdf",
-                )
+    out = annotate_pdf(
+        pdf_bytes,
+        sig_bytes=sig_bytes if sig_obj else None,
+        sig_page=int(page_num),
+        sig_x=sig_x,
+        sig_y=sig_y,
+        sig_width=sig_w,
+        text=txt_obj.get("text","") if txt_obj else "",
+        text_page=int(page_num),
+        text_x=text_x,
+        text_y=text_y,
+        font_size=int(font_size_pt),
+    )
+
+    st.success("Listo ✅")
+    st.download_button(
+        "⬇️ Descargar PDF anotado",
+        data=out,
+        file_name=f"annotated_{ann_file.name}",
+        mime="application/pdf",
+    )
+
             else:
                 st.error("No se pudo obtener datos de anotación.")
     else:
