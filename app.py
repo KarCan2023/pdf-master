@@ -442,6 +442,36 @@ def annotate_pdf(
 
     return doc_to_bytes(doc)
 
+def annotate_pdf(
+    pdf_bytes: bytes,
+    sig_bytes: Optional[bytes] = None,
+    sig_page: int = 1,
+    sig_x: float = 50,
+    sig_y: float = 50,
+    sig_width: float = 150,
+    text: str = "",
+    text_page: int = 1,
+    text_x: float = 50,
+    text_y: float = 50,
+    font_size: int = 12,
+) -> bytes:
+    """Añade una firma en PNG y/o texto a un PDF."""
+    doc = pdf_bytes_to_doc(pdf_bytes)
+
+    if sig_bytes:
+        p = doc.load_page(max(0, min(sig_page - 1, doc.page_count - 1)))
+        img = Image.open(io.BytesIO(sig_bytes))
+        ratio = img.height / img.width
+        rect = fitz.Rect(sig_x, sig_y, sig_x + sig_width, sig_y + sig_width * ratio)
+        p.insert_image(rect, stream=sig_bytes)
+
+    if text:
+        p = doc.load_page(max(0, min(text_page - 1, doc.page_count - 1)))
+        p.insert_text((text_x, text_y), text, fontsize=font_size)
+
+    return doc_to_bytes(doc)
+
+
 def _preprocess_for_ocr(pil_img: Image.Image) -> Image.Image:
     """
     Preprocesado opcional para mejorar OCR: gris, binarización/adaptativo, nitidez.
