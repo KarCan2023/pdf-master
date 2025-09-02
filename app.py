@@ -790,41 +790,86 @@ with tabs[9]:
     ann_file = st.file_uploader("Sube un PDF", type=["pdf"], key="annotate_pdf")
     sig_file = st.file_uploader("Firma (PNG)", type=["png"], key="sig_img")
     text_to_add = st.text_input("Texto a añadir", value="", key="annot_text")
-    col_sig, col_txt = st.columns(2)
-    with col_sig:
-        sig_page = st.number_input("Página firma", min_value=1, value=1, step=1)
-        sig_x = st.number_input("Posición X firma", min_value=0.0, value=50.0, step=10.0)
-        sig_y = st.number_input("Posición Y firma", min_value=0.0, value=50.0, step=10.0)
-        sig_w = st.number_input("Ancho firma", min_value=10.0, value=150.0, step=10.0)
-    with col_txt:
-        text_page = st.number_input("Página texto", min_value=1, value=1, step=1)
-        text_x = st.number_input("Posición X texto", min_value=0.0, value=50.0, step=10.0)
-        text_y = st.number_input("Posición Y texto", min_value=0.0, value=50.0, step=10.0)
-        font_size = st.number_input("Tamaño de fuente", min_value=4, max_value=72, value=12, step=1)
-    if ann_file and (sig_file or text_to_add) and st.button("Aplicar anotaciones", type="primary"):
-        with st.spinner("Anotando..."):
-            out = annotate_pdf(
-                ann_file.read(),
-                sig_bytes=sig_file.read() if sig_file else None,
-                sig_page=int(sig_page),
-                sig_x=float(sig_x),
-                sig_y=float(sig_y),
-                sig_width=float(sig_w),
-                text=text_to_add,
-                text_page=int(text_page),
-                text_x=float(text_x),
-                text_y=float(text_y),
-                font_size=int(font_size),
-            )
-        st.success("Listo ✅")
-        st.download_button(
-            "⬇️ Descargar PDF anotado",
-            data=out,
-            file_name=f"annotated_{ann_file.name}",
-            mime="application/pdf",
+    font_size = st.number_input("Tamaño de fuente", min_value=4, max_value=72, value=12, step=1)
+    if ann_file:
+        pdf_bytes = ann_file.read()
+        doc_preview = fitz.open(stream=pdf_bytes, filetype="pdf")
+        page_num = st.number_input(
+            "Página a previsualizar", min_value=1, max_value=doc_preview.page_count, value=1, step=1
         )
-    elif ann_file:
-        st.info("Sube una firma o escribe un texto para añadir.")
+        page = doc_preview.load_page(int(page_num) - 1)
+        pix = page.get_pixmap(dpi=dpi)
+        page_img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        objects = []
+        sig_bytes = None
+        if sig_file:
+            sig_bytes = sig_file.read()
+            sig_img = Image.open(io.BytesIO(sig_bytes))
+            ratio = sig_img.height / sig_img.width
+            sig_w = 150
+            sig_h = sig_w * ratio
+            sig_b64 = base64.b64encode(sig_bytes).decode()
+            objects.append(
+                {
+                    "type": "image",
+                    "left": 50,
+                    "top": 50,
+                    "width": sig_w,
+                    "height": sig_h,
+                    "src": f"data:image/png;base64,{sig_b64}",
+                }
+            )
+        if text_to_add:
+            objects.append(
+                {
+                    "type": "textbox",
+                    "text": text_to_add,
+                    "fontSize": font_size,
+                    "left": 50,
+                    "top": 50 + (objects[0]["height"] if objects else 0),
+                }
+            )
+        data = {"objects": objects}
+        canvas_result = st_canvas(
+            background_image=page_img,
+            width=pix.width,
+            height=pix.height,
+            drawing_mode="transform",
+            initial_drawing=data,
+            key="anno_canvas",
+        )
+        if (sig_file or text_to_add) and st.button("Aplicar anotaciones", type="primary"):
+            if canvas_result.json_data:
+                canvas_data = json.loads(canvas_result.json_data)
+                sig_obj = next((o for o in canvas_data.get("objects", []) if o.get("type") == "image"), None)
+                txt_obj = next(
+                    (o for o in canvas_data.get("objects", []) if o.get("type") in ("textbox", "i-text")), None
+                )
+                scale = 72 / dpi
+                out = annotate_pdf(
+                    pdf_bytes,
+                    sig_bytes=sig_bytes if sig_obj else None,
+                    sig_page=int(page_num),
+                    sig_x=sig_obj["left"] * scale if sig_obj else 0,
+                    sig_y=sig_obj["top"] * scale if sig_obj else 0,
+                    sig_width=sig_obj["width"] * scale if sig_obj else 0,
+                    text=txt_obj.get("text", "") if txt_obj else "",
+                    text_page=int(page_num),
+                    text_x=txt_obj["left"] * scale if txt_obj else 0,
+                    text_y=txt_obj["top"] * scale if txt_obj else 0,
+                    font_size=int(txt_obj.get("fontSize", font_size) * scale) if txt_obj else font_size,
+                )
+                st.success("Listo ✅")
+                st.download_button(
+                    "⬇️ Descargar PDF anotado",
+                    data=out,
+                    file_name=f"annotated_{ann_file.name}",
+                    mime="application/pdf",
+                )
+            else:
+                st.error("No se pudo obtener datos de anotación.")
+    else:
+        st.info("Sube un PDF para empezar.")
 
 st.markdown("---")
 with st.expander("ℹ️ Notas y límites prácticos"):
