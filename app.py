@@ -18,11 +18,13 @@ from typing import List, Tuple, Optional
 import time
 import json
 import requests
+import base64
 
 
 import streamlit as st
 import fitz  # PyMuPDF
 from PIL import Image
+from streamlit_drawable_canvas import st_canvas
 
 # OCR (opcional; el motor real es Tesseract en el sistema)
 try:
