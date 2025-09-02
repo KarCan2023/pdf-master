@@ -4,4 +4,4 @@ pillow>=9.5
 pytesseract>=0.3.10
 opencv-python-headless>=4.9
 requests>=2.31
-streamlit-drawable-canvas>=0.9.3
+streamlit-drawable-canvas>=0.9.7
