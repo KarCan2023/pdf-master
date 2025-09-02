@@ -802,64 +802,75 @@ with tabs[9]:
         )
         page = doc_preview.load_page(int(page_num) - 1)
 
-        # Render de la página -> imagen PIL (sin alpha)
+        # Render página -> imagen PIL
         mat = fitz.Matrix(dpi/72, dpi/72)
         pix = page.get_pixmap(matrix=mat, alpha=False)
         page_img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
-        # Base de la página como objeto imagen (no seleccionable)
+        # Base64 de la página (para objeto imagen de fondo)
         buf = io.BytesIO()
         page_img.save(buf, format="PNG")
         bg_src = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 
+        # ---- Zoom (%)
+        default_fit = min(1.0, 1000 / float(pix.width))  # intenta encajar a ~1000px
+        zoom_pct = st.slider("Zoom (%)", 25, 200, int(default_fit * 100))
+        zoom = zoom_pct / 100.0
+        canvas_w, canvas_h = int(pix.width * zoom), int(pix.height * zoom)
+
+        # ---- Objetos iniciales
         objects = [{
             "type": "image",
             "left": 0,
             "top": 0,
-            "width": int(pix.width),
+            "width": int(pix.width),          # tamaño natural
             "height": int(pix.height),
+            "scaleX": zoom,                    # se ajusta con zoom
+            "scaleY": zoom,
             "src": bg_src,
-            "selectable": False,     # <- clave: no seleccionable (fondo)
+            "selectable": False,
             "evented": False
         }]
 
-        # Firma opcional como imagen seleccionable (encima)
         sig_bytes = None
         if sig_file:
             sig_bytes = sig_file.read()
             sig_img = Image.open(io.BytesIO(sig_bytes))
-            ratio = sig_img.height / sig_img.width
-            sig_w = 150
-            sig_h = int(sig_w * ratio)
+            nat_w, nat_h = sig_img.size
+            # Queremos ~150 px de ancho en coordenadas originales -> escalarlo
+            target_w = 150.0
+            sig_scale = target_w / float(nat_w)
+
             sig_b64 = base64.b64encode(sig_bytes).decode()
             objects.append({
                 "type": "image",
-                "left": 50,
-                "top": 50,
-                "width": sig_w,
-                "height": sig_h,
+                "left": 50 * zoom,              # coord visual (se escalan con zoom)
+                "top": 50 * zoom,
+                "width": nat_w,                 # NATURAL
+                "height": nat_h,                # NATURAL
+                "scaleX": sig_scale * zoom,     # escala visible = sig_scale * zoom
+                "scaleY": sig_scale * zoom,
                 "src": f"data:image/png;base64,{sig_b64}",
                 "selectable": True
             })
 
-        # Texto opcional
         if text_to_add:
             objects.append({
-                "type": "i-text",     # más fiable que "textbox" en FabricJS
+                "type": "i-text",
                 "text": text_to_add,
-                "fontSize": int(font_size),
-                "left": 50,
-                "top": 50 + (objects[-1]["height"] if objects and objects[-1]["type"]=="image" and objects[-1].get("selectable",True) else 0),
+                "fontSize": int(font_size * zoom),  # tamaño visual acorde al zoom
+                "left": 50 * zoom,
+                "top": 50 * zoom + (objects[-1]["height"] * objects[-1].get("scaleY", 1.0) if objects and objects[-1]["type"]=="image" else 0),
                 "selectable": True
             })
 
         initial_json = {"objects": objects}
 
-        # Canvas SIN background_image (ponemos color blanco)
+        # Canvas SIN background_image → evitamos pantalla negra
         canvas_result = st_canvas(
             background_color="#FFFFFF",
-            width=int(pix.width),
-            height=int(pix.height),
+            width=canvas_w,
+            height=canvas_h,
             drawing_mode="transform",
             initial_drawing=initial_json,
             display_toolbar=True,
@@ -869,35 +880,52 @@ with tabs[9]:
         # Aplicar anotaciones al PDF
         if (sig_file or text_to_add) and st.button("Aplicar anotaciones", type="primary"):
             if canvas_result.json_data:
-                canvas_data = json.loads(canvas_result.json_data)
+                data = json.loads(canvas_result.json_data)
 
-                # Tomar la PRIMERA imagen seleccionable (no la de fondo)
+                # Tomar 1ra imagen seleccionable (firma) y 1er objeto de texto
                 sig_obj = next(
-                    (o for o in canvas_data.get("objects", [])
-                     if o.get("type") == "image" and o.get("selectable", True)),
+                    (o for o in data.get("objects", [])
+                        if o.get("type") == "image" and o.get("selectable", True)),
                     None
                 )
-                # Tomar el primer texto
                 txt_obj = next(
-                    (o for o in canvas_data.get("objects", [])
-                     if o.get("type") in ("i-text", "textbox")),
+                    (o for o in data.get("objects", [])
+                        if o.get("type") in ("i-text", "textbox")),
                     None
                 )
 
-                scale = 72.0 / float(dpi)  # px canvas -> puntos PDF
+                inv_zoom = 1.0 / zoom
+                px_to_pt = 72.0 / float(dpi)  # px originales -> puntos PDF
+
+                def to_pt(x):  # coord canvas -> px original -> puntos
+                    return float(x) * inv_zoom * px_to_pt
+
+                # Firma
+                sig_x = to_pt(sig_obj["left"]) if sig_obj else 0.0
+                sig_y = to_pt(sig_obj["top"]) if sig_obj else 0.0
+                sig_w = 0.0
+                if sig_obj:
+                    eff_w_canvas = float(sig_obj["width"]) * float(sig_obj.get("scaleX", 1.0))
+                    sig_w = to_pt(eff_w_canvas)
+
+                # Texto
+                text_x = to_pt(txt_obj["left"]) if txt_obj else 0.0
+                text_y = to_pt(txt_obj["top"]) if txt_obj else 0.0
+                fs_canvas = float(txt_obj.get("fontSize", font_size * zoom)) if txt_obj else float(font_size * zoom)
+                font_size_pt = to_pt(fs_canvas)
 
                 out = annotate_pdf(
                     pdf_bytes,
                     sig_bytes=sig_bytes if sig_obj else None,
                     sig_page=int(page_num),
-                    sig_x=float(sig_obj["left"]) * scale if sig_obj else 0.0,
-                    sig_y=float(sig_obj["top"]) * scale if sig_obj else 0.0,
-                    sig_width=float(sig_obj["width"]) * scale if sig_obj else 0.0,
+                    sig_x=sig_x,
+                    sig_y=sig_y,
+                    sig_width=sig_w,
                     text=txt_obj.get("text","") if txt_obj else "",
                     text_page=int(page_num),
-                    text_x=float(txt_obj["left"]) * scale if txt_obj else 0.0,
-                    text_y=float(txt_obj["top"]) * scale if txt_obj else 0.0,
-                    font_size=int(float(txt_obj.get("fontSize", font_size)) * scale) if txt_obj else int(font_size),
+                    text_x=text_x,
+                    text_y=text_y,
+                    font_size=int(font_size_pt),
                 )
 
                 st.success("Listo ✅")
@@ -911,6 +939,7 @@ with tabs[9]:
                 st.error("No se pudo obtener datos de anotación.")
     else:
         st.info("Sube un PDF para empezar.")
+
 
 
 st.markdown("---")
