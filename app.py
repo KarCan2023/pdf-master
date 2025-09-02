@@ -937,8 +937,7 @@ if (sig_file or text_to_add) and st.button("Aplicar anotaciones", type="primary"
         mime="application/pdf",
     )
 
-            else:
-                st.error("No se pudo obtener datos de anotación.")
+
     else:
         st.info("Sube un PDF para empezar.")
 
