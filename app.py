@@ -802,6 +802,10 @@ with tabs[9]:
         page = doc_preview.load_page(int(page_num) - 1)
         pix = page.get_pixmap(dpi=dpi)
         page_img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        buf = io.BytesIO()
+        page_img.save(buf, format="PNG")
+        page_img_b64 = base64.b64encode(buf.getvalue()).decode()
+        page_img_data = f"data:image/png;base64,{page_img_b64}"
         objects = []
         sig_bytes = None
         if sig_file:
@@ -833,7 +837,7 @@ with tabs[9]:
             )
         data = {"objects": objects}
         canvas_result = st_canvas(
-            background_image=page_img,
+            background_image=page_img_data,
             width=pix.width,
             height=pix.height,
             drawing_mode="transform",
