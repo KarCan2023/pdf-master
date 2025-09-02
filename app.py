@@ -802,12 +802,28 @@ with tabs[9]:
         )
         page = doc_preview.load_page(int(page_num) - 1)
 
-        # Render de la página a imagen PIL (usa tu slider 'dpi')
-        pix = page.get_pixmap(dpi=dpi)
+        # Render de la página -> imagen PIL (sin alpha)
+        mat = fitz.Matrix(dpi/72, dpi/72)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
         page_img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
-        # Objetos iniciales opcionales para el canvas (firma + texto)
-        objects = []
+        # Base de la página como objeto imagen (no seleccionable)
+        buf = io.BytesIO()
+        page_img.save(buf, format="PNG")
+        bg_src = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+        objects = [{
+            "type": "image",
+            "left": 0,
+            "top": 0,
+            "width": int(pix.width),
+            "height": int(pix.height),
+            "src": bg_src,
+            "selectable": False,     # <- clave: no seleccionable (fondo)
+            "evented": False
+        }]
+
+        # Firma opcional como imagen seleccionable (encima)
         sig_bytes = None
         if sig_file:
             sig_bytes = sig_file.read()
@@ -815,7 +831,6 @@ with tabs[9]:
             ratio = sig_img.height / sig_img.width
             sig_w = 150
             sig_h = int(sig_w * ratio)
-            # En initial_drawing, para imagen usa src base64 (Fabric.js lo admite)
             sig_b64 = base64.b64encode(sig_bytes).decode()
             objects.append({
                 "type": "image",
@@ -824,24 +839,30 @@ with tabs[9]:
                 "width": sig_w,
                 "height": sig_h,
                 "src": f"data:image/png;base64,{sig_b64}",
+                "selectable": True
             })
+
+        # Texto opcional
         if text_to_add:
             objects.append({
-                "type": "textbox",
+                "type": "i-text",     # más fiable que "textbox" en FabricJS
                 "text": text_to_add,
                 "fontSize": int(font_size),
                 "left": 50,
-                "top": 50 + (objects[0]["height"] if objects else 0),
+                "top": 50 + (objects[-1]["height"] if objects and objects[-1]["type"]=="image" and objects[-1].get("selectable",True) else 0),
+                "selectable": True
             })
+
         initial_json = {"objects": objects}
 
-        # ⬇️ Aquí está el fix: background_image = page_img (PIL), no string
+        # Canvas SIN background_image (ponemos color blanco)
         canvas_result = st_canvas(
-            background_image=page_img,
+            background_color="#FFFFFF",
             width=int(pix.width),
             height=int(pix.height),
             drawing_mode="transform",
             initial_drawing=initial_json,
+            display_toolbar=True,
             key="anno_canvas",
         )
 
@@ -850,13 +871,20 @@ with tabs[9]:
             if canvas_result.json_data:
                 canvas_data = json.loads(canvas_result.json_data)
 
-                # Busca primera imagen y primer texto en el canvas (ajusta si quieres múltiples)
-                sig_obj = next((o for o in canvas_data.get("objects", []) if o.get("type") == "image"), None)
-                txt_obj = next((o for o in canvas_data.get("objects", []) if o.get("type") in ("textbox", "i-text")), None)
+                # Tomar la PRIMERA imagen seleccionable (no la de fondo)
+                sig_obj = next(
+                    (o for o in canvas_data.get("objects", [])
+                     if o.get("type") == "image" and o.get("selectable", True)),
+                    None
+                )
+                # Tomar el primer texto
+                txt_obj = next(
+                    (o for o in canvas_data.get("objects", [])
+                     if o.get("type") in ("i-text", "textbox")),
+                    None
+                )
 
-                # Escala: de pixeles de canvas → puntos PDF
-                # pix.width ≈ page.rect.width * (dpi/72)
-                scale = 72.0 / float(dpi)
+                scale = 72.0 / float(dpi)  # px canvas -> puntos PDF
 
                 out = annotate_pdf(
                     pdf_bytes,
@@ -865,7 +893,7 @@ with tabs[9]:
                     sig_x=float(sig_obj["left"]) * scale if sig_obj else 0.0,
                     sig_y=float(sig_obj["top"]) * scale if sig_obj else 0.0,
                     sig_width=float(sig_obj["width"]) * scale if sig_obj else 0.0,
-                    text=txt_obj.get("text", "") if txt_obj else "",
+                    text=txt_obj.get("text","") if txt_obj else "",
                     text_page=int(page_num),
                     text_x=float(txt_obj["left"]) * scale if txt_obj else 0.0,
                     text_y=float(txt_obj["top"]) * scale if txt_obj else 0.0,
