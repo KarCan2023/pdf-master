@@ -793,6 +793,7 @@ with tabs[9]:
     sig_file = st.file_uploader("Firma (PNG)", type=["png"], key="sig_img")
     text_to_add = st.text_input("Texto a añadir", value="", key="annot_text")
     font_size = st.number_input("Tamaño de fuente", min_value=4, max_value=72, value=12, step=1)
+
     if ann_file:
         pdf_bytes = ann_file.read()
         doc_preview = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -800,12 +801,12 @@ with tabs[9]:
             "Página a previsualizar", min_value=1, max_value=doc_preview.page_count, value=1, step=1
         )
         page = doc_preview.load_page(int(page_num) - 1)
+
+        # Render de la página a imagen PIL (usa tu slider 'dpi')
         pix = page.get_pixmap(dpi=dpi)
         page_img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        buf = io.BytesIO()
-        page_img.save(buf, format="PNG")
-        page_img_b64 = base64.b64encode(buf.getvalue()).decode()
-        page_img_data = f"data:image/png;base64,{page_img_b64}"
+
+        # Objetos iniciales opcionales para el canvas (firma + texto)
         objects = []
         sig_bytes = None
         if sig_file:
@@ -813,58 +814,64 @@ with tabs[9]:
             sig_img = Image.open(io.BytesIO(sig_bytes))
             ratio = sig_img.height / sig_img.width
             sig_w = 150
-            sig_h = sig_w * ratio
+            sig_h = int(sig_w * ratio)
+            # En initial_drawing, para imagen usa src base64 (Fabric.js lo admite)
             sig_b64 = base64.b64encode(sig_bytes).decode()
-            objects.append(
-                {
-                    "type": "image",
-                    "left": 50,
-                    "top": 50,
-                    "width": sig_w,
-                    "height": sig_h,
-                    "src": f"data:image/png;base64,{sig_b64}",
-                }
-            )
+            objects.append({
+                "type": "image",
+                "left": 50,
+                "top": 50,
+                "width": sig_w,
+                "height": sig_h,
+                "src": f"data:image/png;base64,{sig_b64}",
+            })
         if text_to_add:
-            objects.append(
-                {
-                    "type": "textbox",
-                    "text": text_to_add,
-                    "fontSize": font_size,
-                    "left": 50,
-                    "top": 50 + (objects[0]["height"] if objects else 0),
-                }
-            )
-        data = {"objects": objects}
+            objects.append({
+                "type": "textbox",
+                "text": text_to_add,
+                "fontSize": int(font_size),
+                "left": 50,
+                "top": 50 + (objects[0]["height"] if objects else 0),
+            })
+        initial_json = {"objects": objects}
+
+        # ⬇️ Aquí está el fix: background_image = page_img (PIL), no string
         canvas_result = st_canvas(
-            background_image=page_img_data,
-            width=pix.width,
-            height=pix.height,
+            background_image=page_img,
+            width=int(pix.width),
+            height=int(pix.height),
             drawing_mode="transform",
-            initial_drawing=data,
+            initial_drawing=initial_json,
             key="anno_canvas",
         )
+
+        # Aplicar anotaciones al PDF
         if (sig_file or text_to_add) and st.button("Aplicar anotaciones", type="primary"):
             if canvas_result.json_data:
                 canvas_data = json.loads(canvas_result.json_data)
+
+                # Busca primera imagen y primer texto en el canvas (ajusta si quieres múltiples)
                 sig_obj = next((o for o in canvas_data.get("objects", []) if o.get("type") == "image"), None)
-                txt_obj = next(
-                    (o for o in canvas_data.get("objects", []) if o.get("type") in ("textbox", "i-text")), None
-                )
-                scale = 72 / dpi
+                txt_obj = next((o for o in canvas_data.get("objects", []) if o.get("type") in ("textbox", "i-text")), None)
+
+                # Escala: de pixeles de canvas → puntos PDF
+                # pix.width ≈ page.rect.width * (dpi/72)
+                scale = 72.0 / float(dpi)
+
                 out = annotate_pdf(
                     pdf_bytes,
                     sig_bytes=sig_bytes if sig_obj else None,
                     sig_page=int(page_num),
-                    sig_x=sig_obj["left"] * scale if sig_obj else 0,
-                    sig_y=sig_obj["top"] * scale if sig_obj else 0,
-                    sig_width=sig_obj["width"] * scale if sig_obj else 0,
+                    sig_x=float(sig_obj["left"]) * scale if sig_obj else 0.0,
+                    sig_y=float(sig_obj["top"]) * scale if sig_obj else 0.0,
+                    sig_width=float(sig_obj["width"]) * scale if sig_obj else 0.0,
                     text=txt_obj.get("text", "") if txt_obj else "",
                     text_page=int(page_num),
-                    text_x=txt_obj["left"] * scale if txt_obj else 0,
-                    text_y=txt_obj["top"] * scale if txt_obj else 0,
-                    font_size=int(txt_obj.get("fontSize", font_size) * scale) if txt_obj else font_size,
+                    text_x=float(txt_obj["left"]) * scale if txt_obj else 0.0,
+                    text_y=float(txt_obj["top"]) * scale if txt_obj else 0.0,
+                    font_size=int(float(txt_obj.get("fontSize", font_size)) * scale) if txt_obj else int(font_size),
                 )
+
                 st.success("Listo ✅")
                 st.download_button(
                     "⬇️ Descargar PDF anotado",
@@ -876,6 +883,7 @@ with tabs[9]:
                 st.error("No se pudo obtener datos de anotación.")
     else:
         st.info("Sube un PDF para empezar.")
+
 
 st.markdown("---")
 with st.expander("ℹ️ Notas y límites prácticos"):
