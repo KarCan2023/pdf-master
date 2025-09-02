@@ -413,6 +413,34 @@ def rotate_pages(pdf_bytes: bytes, ranges_str: str, degrees: int = 90) -> bytes:
         page.set_rotation((page.rotation + degrees) % 360)
     return doc_to_bytes(doc)
 
+def annotate_pdf(
+    pdf_bytes: bytes,
+    sig_bytes: Optional[bytes] = None,
+    sig_page: int = 1,
+    sig_x: float = 50,
+    sig_y: float = 50,
+    sig_width: float = 150,
+    text: str = "",
+    text_page: int = 1,
+    text_x: float = 50,
+    text_y: float = 50,
+    font_size: int = 12,
+) -> bytes:
+    """Añade una firma en PNG y/o texto a un PDF."""
+    doc = pdf_bytes_to_doc(pdf_bytes)
+
+    if sig_bytes:
+        p = doc.load_page(max(0, min(sig_page - 1, doc.page_count - 1)))
+        img = Image.open(io.BytesIO(sig_bytes))
+        ratio = img.height / img.width
+        rect = fitz.Rect(sig_x, sig_y, sig_x + sig_width, sig_y + sig_width * ratio)
+        p.insert_image(rect, stream=sig_bytes)
+
+    if text:
+        p = doc.load_page(max(0, min(text_page - 1, doc.page_count - 1)))
+        p.insert_text((text_x, text_y), text, fontsize=font_size)
+
+    return doc_to_bytes(doc)
 
 def _preprocess_for_ocr(pil_img: Image.Image) -> Image.Image:
     """
@@ -507,7 +535,7 @@ with st.sidebar:
     st.markdown("---")
     st.info("Consejo: para resultados más livianos, baja DPI y/o Calidad JPEG. Para OCR, DPI 200–300 suele mejorar resultados.")
 
-tabs = st.tabs(["Comprimir", "Dividir", "Combinar", "Extraer", "Convertir", "Desbloquear", "Ordenar/Rotar", "OCR", "Resumir con IA"])
+tabs = st.tabs(["Comprimir", "Dividir", "Combinar", "Extraer", "Convertir", "Desbloquear", "Ordenar/Rotar", "OCR", "Resumir con IA", "Anotar"])
 
 # --------- Comprimir ---------
 with tabs[0]:
@@ -757,6 +785,46 @@ with tabs[8]:
                     st.error("Fallo al generar el resumen.")
                     st.code(str(e))
 
+with tabs[9]:
+    st.subheader("✍️ Anotar PDF")
+    ann_file = st.file_uploader("Sube un PDF", type=["pdf"], key="annotate_pdf")
+    sig_file = st.file_uploader("Firma (PNG)", type=["png"], key="sig_img")
+    text_to_add = st.text_input("Texto a añadir", value="", key="annot_text")
+    col_sig, col_txt = st.columns(2)
+    with col_sig:
+        sig_page = st.number_input("Página firma", min_value=1, value=1, step=1)
+        sig_x = st.number_input("Posición X firma", min_value=0.0, value=50.0, step=10.0)
+        sig_y = st.number_input("Posición Y firma", min_value=0.0, value=50.0, step=10.0)
+        sig_w = st.number_input("Ancho firma", min_value=10.0, value=150.0, step=10.0)
+    with col_txt:
+        text_page = st.number_input("Página texto", min_value=1, value=1, step=1)
+        text_x = st.number_input("Posición X texto", min_value=0.0, value=50.0, step=10.0)
+        text_y = st.number_input("Posición Y texto", min_value=0.0, value=50.0, step=10.0)
+        font_size = st.number_input("Tamaño de fuente", min_value=4, max_value=72, value=12, step=1)
+    if ann_file and (sig_file or text_to_add) and st.button("Aplicar anotaciones", type="primary"):
+        with st.spinner("Anotando..."):
+            out = annotate_pdf(
+                ann_file.read(),
+                sig_bytes=sig_file.read() if sig_file else None,
+                sig_page=int(sig_page),
+                sig_x=float(sig_x),
+                sig_y=float(sig_y),
+                sig_width=float(sig_w),
+                text=text_to_add,
+                text_page=int(text_page),
+                text_x=float(text_x),
+                text_y=float(text_y),
+                font_size=int(font_size),
+            )
+        st.success("Listo ✅")
+        st.download_button(
+            "⬇️ Descargar PDF anotado",
+            data=out,
+            file_name=f"annotated_{ann_file.name}",
+            mime="application/pdf",
+        )
+    elif ann_file:
+        st.info("Sube una firma o escribe un texto para añadir.")
 
 st.markdown("---")
 with st.expander("ℹ️ Notas y límites prácticos"):
