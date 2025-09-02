@@ -938,9 +938,6 @@ if (sig_file or text_to_add) and st.button("Aplicar anotaciones", type="primary"
     )
 
 
-    else:
-        st.info("Sube un PDF para empezar.")
-
 
 
 st.markdown("---")
